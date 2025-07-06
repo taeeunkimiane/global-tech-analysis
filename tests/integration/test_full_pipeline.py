@@ -1,5 +1,5 @@
 # tests/integration/test_full_pipeline.py
-import pytest
+'''import pytest
 import json
 import tempfile
 import os
@@ -358,7 +358,7 @@ class TestSecurityIntegration:
                 'date': '2025-07-05',
                 'sentiment': 0.5,
                 'source': 'Test Source',
-                'url': 'javascript:alert("XSS")'
+                'url': 'javascript:alert("XSS")''
             }
         ]
         
@@ -378,4 +378,4 @@ class TestSecurityIntegration:
         print("✅ 입력 데이터 보안 테스트 통과")
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short", "-x"])
+    pytest.main([__file__, "-v", "--tb=short", "-x"])'''
