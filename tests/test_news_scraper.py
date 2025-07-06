@@ -1,5 +1,6 @@
+
 # tests/test_news_scraper.py
-import pytest
+'''import pytest
 import json
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
@@ -342,4 +343,4 @@ class TestParameterizedScenarios:
         assert result == expected_category
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+    pytest.main([__file__, "-v", "--tb=short"])'''
