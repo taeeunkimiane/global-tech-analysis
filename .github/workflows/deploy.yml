@@ -1,1 +1,309 @@
+name: Deploy Global Tech Analysis System
 
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_IMAGE: global-tech-analysis
+  DOCKER_TAG: ${{ github.sha }}
+
+jobs:
+  # 코드 품질 검사
+  lint-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 pytest black
+    
+    - name: Code formatting check
+      run: |
+        black --check --diff .
+    
+    - name: Lint with flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Test with pytest
+      run: |
+        pytest tests/ -v --cov=. --cov-report=xml
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.xml
+        fail_ci_if_error: false
+
+  # Docker 이미지 빌드 및 푸시
+  build-and-push:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and push main application
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Build and push data collector
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.collector
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}-collector:latest
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}-collector:${{ env.DOCKER_TAG }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Streamlit Cloud 배포
+  deploy-streamlit:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to Streamlit Cloud
+      env:
+        STREAMLIT_CLOUD_TOKEN: ${{ secrets.STREAMLIT_CLOUD_TOKEN }}
+      run: |
+        # Streamlit Cloud 배포는 자동으로 GitHub 저장소를 감지하여 배포됩니다.
+        echo "Streamlit Cloud 자동 배포 트리거됨"
+        
+        # 필요시 webhook을 통한 수동 배포 트리거
+        if [ ! -z "$STREAMLIT_CLOUD_TOKEN" ]; then
+          curl -X POST \
+            -H "Authorization: Bearer $STREAMLIT_CLOUD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"repository": "${{ github.repository }}", "branch": "main"}' \
+            https://share.streamlit.io/api/v1/deploy
+        fi
+
+  # 도커 컴포즈 기반 배포 (VPS/클라우드 서버용)
+  deploy-docker:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Deploy to production server
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PROD_HOST }}
+        username: ${{ secrets.PROD_USER }}
+        key: ${{ secrets.PROD_SSH_KEY }}
+        port: ${{ secrets.PROD_PORT || 22 }}
+        script: |
+          # 프로젝트 디렉토리로 이동
+          cd /opt/global-tech-analysis
+          
+          # 최신 코드 풀
+          git pull origin main
+          
+          # 환경 변수 설정
+          export DOCKER_IMAGE_TAG=${{ env.DOCKER_TAG }}
+          
+          # Docker Compose로 서비스 업데이트
+          docker-compose pull
+          docker-compose up -d --remove-orphans
+          
+          # 이전 이미지 정리
+          docker image prune -f
+          
+          # 헬스체크
+          sleep 30
+          curl -f http://localhost:8501/_stcore/health || exit 1
+          
+          echo "배포 완료: $(date)"
+
+  # 보안 스캔
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Run safety check for Python dependencies
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+    
+    - name: Upload safety report
+      uses: actions/upload-artifact@v3
+      with:
+        name: safety-report
+        path: safety-report.json
+
+  # 성능 테스트
+  performance-test:
+    needs: deploy-docker
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install K6
+      run: |
+        sudo gpg -k
+        sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+    
+    - name: Run performance tests
+      run: |
+        k6 run tests/performance/load-test.js
+      env:
+        TEST_HOST: ${{ secrets.PROD_HOST }}
+
+  # 모니터링 알림
+  notify:
+    needs: [deploy-streamlit, deploy-docker]
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployment'
+        text: |
+          🚀 글로벌 기술 이슈 분석 시스템 배포 결과
+          
+          • Streamlit Cloud 배포: ${{ needs.deploy-streamlit.result }}
+          • Docker 배포: ${{ needs.deploy-docker.result }}
+          • 커밋: ${{ github.sha }}
+          • 브랜치: ${{ github.ref }}
+          • 작성자: ${{ github.actor }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: always()
+    
+    - name: Notify Discord
+      uses: sarisia/actions-status-discord@v1
+      with:
+        webhook: ${{ secrets.DISCORD_WEBHOOK }}
+        title: "Global Tech Analysis System - 배포 완료"
+        description: |
+          🌐 글로벌 기술 이슈 분석 시스템이 성공적으로 배포되었습니다.
+          
+          **배포 정보:**
+          - 커밋: `${{ github.sha }}`
+          - 브랜치: `${{ github.ref }}`
+          - 작성자: ${{ github.actor }}
+          
+          **접속 URL:**
+          - [Streamlit Cloud](https://share.streamlit.io/your-username/global-tech-analysis)
+          - [프로덕션 서버](https://${{ secrets.PROD_DOMAIN }})
+        color: 0x00ff00
+      if: success()
+
+  # 롤백 준비
+  prepare-rollback:
+    needs: [deploy-streamlit, deploy-docker]
+    runs-on: ubuntu-latest
+    if: failure() && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Prepare rollback information
+      run: |
+        echo "ROLLBACK_COMMIT=$(git rev-parse HEAD~1)" >> $GITHUB_ENV
+        echo "CURRENT_COMMIT=${{ github.sha }}" >> $GITHUB_ENV
+    
+    - name: Create rollback issue
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `🚨 배포 실패 - 롤백 필요 (${new Date().toISOString()})`,
+            body: `
+            ## 배포 실패 알림
+            
+            **실패한 커밋:** \`${{ github.sha }}\`
+            **이전 안정 버전:** \`${process.env.ROLLBACK_COMMIT}\`
+            **실패 시간:** ${new Date().toISOString()}
+            
+            ### 자동 롤백 명령어
+            \`\`\`bash
+            git checkout ${process.env.ROLLBACK_COMMIT}
+            docker-compose down
+            docker-compose up -d
+            \`\`\`
+            
+            ### 확인 사항
+            - [ ] 서비스 상태 확인
+            - [ ] 로그 분석
+            - [ ] 사용자 영향도 파악
+            - [ ] 핫픽스 또는 수정사항 적용
+            `,
+            labels: ['deployment', 'critical', 'rollback-needed']
+          });
