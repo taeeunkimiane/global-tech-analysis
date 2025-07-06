@@ -1,4 +1,4 @@
-// tests/performance/load-test.js
+'''// tests/performance/load-test.js
 // K6를 사용한 글로벌 기술 이슈 분석 시스템 성능 테스트
 
 import http from 'k6/http';
@@ -369,4 +369,4 @@ function generateHtmlReport(data) {
 </body>
 </html>
   `;
-}
+}'''
